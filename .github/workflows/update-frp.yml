@@ -1,0 +1,79 @@
+name: Update FRP version
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:      
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get latest FRP version
+        id: frp
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/fatedier/frp/releases/latest | jq -r .tag_name)
+          # убираем ведущую "v"
+          VERSION=${LATEST#v}
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest FRP: $VERSION"
+
+      - name: Get current FRP_VERSION from build.json
+        id: current
+        run: |
+          CURRENT=$(jq -r '.args.FRP_VERSION' frp-client/build.json)
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current FRP_VERSION: $CURRENT"
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [ "${{ steps.frp.outputs.version }}" != "${{ steps.current.outputs.version }}" ]; then
+            echo "update=true" >> $GITHUB_OUTPUT
+            echo "New version available: ${{ steps.frp.outputs.version }}"
+          else
+            echo "update=false" >> $GITHUB_OUTPUT
+            echo "Already up to date"
+          fi
+
+      - name: Update files
+        if: steps.check.outputs.update == 'true'
+        run: |
+          NEW_FRP="${{ steps.frp.outputs.version }}"
+
+          jq --arg v "$NEW_FRP" '.args.FRP_VERSION = $v' frp-client/build.json > tmp.json
+          mv tmp.json frp-client/build.json
+
+          CURRENT_ADDON=$(grep -oP 'version: "\K[^"]+' frp-client/config.yaml)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_ADDON"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_ADDON="$MAJOR.$MINOR.$NEW_PATCH"
+
+          sed -i "s/version: \"$CURRENT_ADDON\"/version: \"$NEW_ADDON\"/" frp-client/config.yaml
+
+          # Меняем version-vX.Y.Z на version-vNEW_ADDON
+          sed -i -E "s|version-v[0-9]+\.[0-9]+\.[0-9]+|version-v${NEW_ADDON}|g" README.md
+
+          echo "Updated FRP_VERSION → $NEW_FRP"
+          echo "Updated addon version → $NEW_ADDON"
+          echo "Updated version badge in README.md → v${NEW_ADDON}"
+
+          echo "NEW_FRP=$NEW_FRP" >> $GITHUB_ENV
+          echo "NEW_ADDON=$NEW_ADDON" >> $GITHUB_ENV
+
+      - name: Commit and push
+        if: steps.check.outputs.update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add frp-client/build.json frp-client/config.yaml README.md
+          git commit -m "Update FRP to ${{ env.NEW_FRP }} and bump addon version to ${{ env.NEW_ADDON }}"
+          git push
